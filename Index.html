@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XIAO BLE Manager</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; min-height: 100vh; }
+h1 { text-align: center; color: #38bdf8; margin-bottom: 8px; font-size: 1.4em; }
+.sub { text-align: center; color: #64748b; margin-bottom: 24px; font-size: .85em; }
+.card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 16px; border: 1px solid #334155; }
+.card h2 { color: #38bdf8; font-size: 1.1em; margin-bottom: 14px; border-bottom: 1px solid #334155; padding-bottom: 8px; }
+label { color: #94a3b8; font-size: .9em; display: block; margin-top: 8px; }
+input { width: 100%; padding: 10px; margin: 6px 0 12px; background: #0f172a; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; font-size: .95em; }
+input:focus { outline: none; border-color: #38bdf8; }
+.btn { display: block; width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: .95em; cursor: pointer; font-weight: 600; margin-top: 6px; }
+.btn-blue { background: #2563eb; color: #fff; }
+.btn-blue:hover { background: #1d4ed8; }
+.btn-red { background: #dc2626; color: #fff; }
+.btn:disabled { background: #475569; cursor: not-allowed; opacity: 0.7; }
+#status { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-top: 12px; font-family: monospace; font-size: .9em; min-height: 50px; white-space: pre-wrap; color: #94a3b8; text-align: center; }
+.ok { color: #4ade80; font-weight: bold; }
+.err { color: #f87171; }
+.warn { color: #fbbf24; font-size: .8em; margin-top: 8px; text-align: center; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+.dot-off { background: #64748b; }
+.dot-on { background: #4ade80; animation: p 1.5s infinite; }
+@keyframes p { 0%,100%{opacity:1} 50%{opacity:.4} }
+</style>
+</head>
+<body>
+
+<h1>📡 XIAO BLE Manager</h1>
+<p class="sub">Hosted on Apps Script | Pure BLE Control</p>
+
+<div class="card">
+    <h2><span id="connDot" class="dot dot-off"></span> Connection</h2>
+    <button id="scanBtn" class="btn btn-blue">🔍 Scan & Connect to XIAO-P</button>
+    <div id="status">Not connected. Tap the button above.</div>
+</div>
+
+<div class="card" id="credCard" style="display:none">
+    <h2>🔑 WiFi Credentials</h2>
+    <label>WiFi SSID</label>
+    <input type="text" id="ssid" placeholder="e.g. Home_5G">
+    <label>WiFi Password</label>
+    <input type="password" id="pass" placeholder="Enter password">
+    <button id="sendBtn" class="btn btn-blue" disabled>📤 Send to Device</button>
+    <p class="warn">Device will connect and status will update to "Live on [Network]".</p>
+</div>
+
+<div class="card" id="forgetCard" style="display:none">
+    <h2>🗑️ Manage Network</h2>
+    <p style="color:#94a3b8;font-size:.85em;margin-bottom:12px">Erase saved credentials to provision a new network.</p>
+    <button id="forgetBtn" class="btn btn-red" disabled>Forget WiFi & Reset</button>
+</div>
+
+<script>
+const SERVICE_UUID = '12345678-1234-1234-1234-123456789abc';
+const CHAR_SSID    = '12345678-1234-1234-1234-123456789abd';
+const CHAR_PASS    = '12345678-1234-1234-1234-123456789abe';
+const CHAR_STATUS  = '12345678-1234-1234-1234-123456789abf';
+const CHAR_COMMAND = '12345678-1234-1234-1234-123456789ac0';
+
+let device, server, service, charSSID, charPass, charStatus, charCmd;
+
+const scanBtn   = document.getElementById('scanBtn');
+const sendBtn   = document.getElementById('sendBtn');
+const forgetBtn = document.getElementById('forgetBtn');
+const statusDiv = document.getElementById('status');
+const connDot   = document.getElementById('connDot');
+const credCard  = document.getElementById('credCard');
+const forgetCard= document.getElementById('forgetCard');
+
+function log(msg, cls='') {
+    statusDiv.innerHTML = cls ? `<span class="${cls}">${msg}</span>` : msg;
+}
+
+// ── 1. SCAN & CONNECT ──────────────────────────────────────
+scanBtn.addEventListener('click', async () => {
+    if (!navigator.bluetooth) {
+        log('❌ Web Bluetooth not supported. Use Chrome on Android/PC.', 'err');
+        return;
+    }
+    try {
+        log('Scanning for XIAO-P...');
+        scanBtn.disabled = true;
+        
+        // Request device by name
+        device = await navigator.bluetooth.requestDevice({ 
+            filters: [{ name: 'XIAO-P' }], 
+            optionalServices: [SERVICE_UUID] 
+        });
+
+        device.addEventListener('gattserverdisconnected', () => {
+            log('⚠ Disconnected from device', 'warn');
+            connDot.className = 'dot dot-off';
+            scanBtn.disabled = false;
+            sendBtn.disabled = true;
+            forgetBtn.disabled = true;
+        });
+
+        log('Connecting to GATT Server...');
+        server = await device.gatt.connect();
+        log('✓ Connected!', 'ok');
+        connDot.className = 'dot dot-on';
+
+        service = await server.getPrimaryService(SERVICE_UUID);
+        charSSID   = await service.getCharacteristic(CHAR_SSID);
+        charPass   = await service.getCharacteristic(CHAR_PASS);
+        charStatus = await service.getCharacteristic(CHAR_STATUS);
+        charCmd    = await service.getCharacteristic(CHAR_COMMAND);
+
+        // ── 2. LISTEN FOR STATUS UPDATES (e.g., "Live on Home_5G") ──
+        await charStatus.startNotifications();
+        charStatus.addEventListener('characteristicvaluechanged', (e) => {
+            const txt = new TextDecoder().decode(e.target.value);
+            if (txt.startsWith("Live on")) {
+                log('✅ ' + txt, 'ok');
+            } else if (txt.includes("Failed") || txt.includes("Forgetting")) {
+                log('⚠️ ' + txt, 'warn');
+            } else {
+                log(txt);
+            }
+        });
+
+        log('✓ Ready. Enter WiFi credentials.', 'ok');
+        credCard.style.display = 'block';
+        forgetCard.style.display = 'block';
+        sendBtn.disabled = false;
+        forgetBtn.disabled = false;
+        scanBtn.textContent = '🔄 Reconnect';
+        scanBtn.disabled = false;
+
+    } catch (err) {
+        log('❌ ' + err.message, 'err');
+        scanBtn.disabled = false;
+    }
+});
+
+// ── 3. SEND CREDENTIALS ────────────────────────────────────
+sendBtn.addEventListener('click', async () => {
+    const ssid = document.getElementById('ssid').value.trim();
+    const pass = document.getElementById('pass').value;
+    if (!ssid) { log('❌ SSID cannot be empty', 'err'); return; }
+
+    try {
+        sendBtn.disabled = true;
+        forgetBtn.disabled = true;
+        log('📤 Sending credentials...');
+        
+        await charSSID.writeValue(new TextEncoder().encode(ssid));
+        await charPass.writeValue(new TextEncoder().encode(pass));
+        
+        log('✓ Sent! Waiting for device to connect...', 'ok');
+        sendBtn.disabled = false;
+        forgetBtn.disabled = false;
+    } catch (err) {
+        log('❌ ' + err.message, 'err');
+        sendBtn.disabled = false;
+        forgetBtn.disabled = false;
+    }
+});
+
+// ── 4. FORGET NETWORK ──────────────────────────────────────
+forgetBtn.addEventListener('click', async () => {
+    if (!confirm('Tell device to forget WiFi and reset?')) return;
+    try {
+        forgetBtn.disabled = true;
+        sendBtn.disabled = true;
+        log('📤 Sending FORGET command...');
+        
+        await charCmd.writeValue(new TextEncoder().encode('FORGET'));
+        log('✓ Command sent. Device is resetting.', 'ok');
+        
+        setTimeout(() => {
+            sendBtn.disabled = false;
+            forgetBtn.disabled = false;
+        }, 2000);
+    } catch (err) {
+        log('❌ ' + err.message, 'err');
+        forgetBtn.disabled = false;
+        sendBtn.disabled = false;
+    }
+});
+</script>
+</body>
+</html>
