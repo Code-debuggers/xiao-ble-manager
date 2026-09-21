@@ -16,7 +16,6 @@ input { width: 100%; padding: 10px; margin: 6px 0 12px; background: #0f172a; bor
 input:focus { outline: none; border-color: #38bdf8; }
 .btn { display: block; width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: .95em; cursor: pointer; font-weight: 600; margin-top: 6px; }
 .btn-blue { background: #2563eb; color: #fff; }
-.btn-blue:hover { background: #1d4ed8; }
 .btn-red { background: #dc2626; color: #fff; }
 .btn:disabled { background: #475569; cursor: not-allowed; opacity: 0.7; }
 #status { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-top: 12px; font-family: monospace; font-size: .9em; min-height: 50px; white-space: pre-wrap; color: #94a3b8; text-align: center; }
@@ -32,7 +31,7 @@ input:focus { outline: none; border-color: #38bdf8; }
 <body>
 
 <h1>📡 XIAO BLE Manager</h1>
-<p class="sub">Hosted on Apps Script | Pure BLE Control</p>
+<p class="sub">Pure BLE Control | Auto-Connects on Boot</p>
 
 <div class="card">
     <h2><span id="connDot" class="dot dot-off"></span> Connection</h2>
@@ -47,7 +46,7 @@ input:focus { outline: none; border-color: #38bdf8; }
     <label>WiFi Password</label>
     <input type="password" id="pass" placeholder="Enter password">
     <button id="sendBtn" class="btn btn-blue" disabled>📤 Send to Device</button>
-    <p class="warn">Device will connect and status will update to "Live on [Network]".</p>
+    <p class="warn">Device will save these and auto-connect on future boots.</p>
 </div>
 
 <div class="card" id="forgetCard" style="display:none">
@@ -64,6 +63,7 @@ const CHAR_STATUS  = '12345678-1234-1234-1234-123456789abf';
 const CHAR_COMMAND = '12345678-1234-1234-1234-123456789ac0';
 
 let device, server, service, charSSID, charPass, charStatus, charCmd;
+let isLive = false; // Tracks if we already received the "Live" message
 
 const scanBtn   = document.getElementById('scanBtn');
 const sendBtn   = document.getElementById('sendBtn');
@@ -77,31 +77,33 @@ function log(msg, cls='') {
     statusDiv.innerHTML = cls ? `<span class="${cls}">${msg}</span>` : msg;
 }
 
-// ── 1. SCAN & CONNECT ──────────────────────────────────────
 scanBtn.addEventListener('click', async () => {
     if (!navigator.bluetooth) {
-        log('❌ Web Bluetooth not supported. Use Chrome on Android/PC.', 'err');
+        log('❌ Web Bluetooth not supported. Use Chrome on Android.', 'err');
         return;
     }
     try {
         log('Scanning for XIAO-P...');
         scanBtn.disabled = true;
         
-        // Request device by name
         device = await navigator.bluetooth.requestDevice({ 
             filters: [{ name: 'XIAO-P' }], 
             optionalServices: [SERVICE_UUID] 
         });
 
+        // FIX: Don't wipe the screen on disconnect, just update the dot
         device.addEventListener('gattserverdisconnected', () => {
-            log('⚠ Disconnected from device', 'warn');
             connDot.className = 'dot dot-off';
-            scanBtn.disabled = false;
-            sendBtn.disabled = true;
-            forgetBtn.disabled = true;
+            if (!isLive) {
+                log('⚠ Disconnected. Tap Reconnect.', 'warn');
+                scanBtn.textContent = '🔄 Reconnect';
+                scanBtn.disabled = false;
+            } else {
+                log('⚠ BLE disconnected, but device is Live on WiFi.', 'warn');
+            }
         });
 
-        log('Connecting to GATT Server...');
+        log('Connecting...');
         server = await device.gatt.connect();
         log('✓ Connected!', 'ok');
         connDot.className = 'dot dot-on';
@@ -112,13 +114,14 @@ scanBtn.addEventListener('click', async () => {
         charStatus = await service.getCharacteristic(CHAR_STATUS);
         charCmd    = await service.getCharacteristic(CHAR_COMMAND);
 
-        // ── 2. LISTEN FOR STATUS UPDATES (e.g., "Live on Home_5G") ──
         await charStatus.startNotifications();
         charStatus.addEventListener('characteristicvaluechanged', (e) => {
             const txt = new TextDecoder().decode(e.target.value);
             if (txt.startsWith("Live on")) {
+                isLive = true;
                 log('✅ ' + txt, 'ok');
             } else if (txt.includes("Failed") || txt.includes("Forgetting")) {
+                isLive = false;
                 log('⚠️ ' + txt, 'warn');
             } else {
                 log(txt);
@@ -139,7 +142,6 @@ scanBtn.addEventListener('click', async () => {
     }
 });
 
-// ── 3. SEND CREDENTIALS ────────────────────────────────────
 sendBtn.addEventListener('click', async () => {
     const ssid = document.getElementById('ssid').value.trim();
     const pass = document.getElementById('pass').value;
@@ -163,12 +165,12 @@ sendBtn.addEventListener('click', async () => {
     }
 });
 
-// ── 4. FORGET NETWORK ──────────────────────────────────────
 forgetBtn.addEventListener('click', async () => {
     if (!confirm('Tell device to forget WiFi and reset?')) return;
     try {
         forgetBtn.disabled = true;
         sendBtn.disabled = true;
+        isLive = false;
         log('📤 Sending FORGET command...');
         
         await charCmd.writeValue(new TextEncoder().encode('FORGET'));
